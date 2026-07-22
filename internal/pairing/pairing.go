@@ -31,6 +31,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/withally/focusally-agent-plugin/internal/api"
@@ -58,10 +60,16 @@ const (
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 // PendingFile is written to <config-dir>/pairing.json the moment a
-// pairing code is minted, so the SessionStart hook can surface it.
+// pairing code is minted. It carries everything needed to RESUME the
+// pairing after process death (reboot, crash): the SessionStart hook
+// surfaces the same code, and a restarted `pair` process polls it with
+// the stored PKCE verifier instead of minting a new one — one
+// connection means one code and one approval. Same sensitivity class
+// and mode (0600) as credentials.json.
 type PendingFile struct {
 	Code      string    `json:"code"`
 	ExpiresAt time.Time `json:"expiresAt"`
+	Verifier  string    `json:"verifier"`
 }
 
 func pendingPath(configDir string) string { return filepath.Join(configDir, "pairing.json") }
@@ -106,15 +114,18 @@ func FormatCode(code string) string {
 	return code
 }
 
-// Run executes the whole pairing flow. Returns silently on any failure;
-// on success credentials are saved and the MCP server registration is
-// attempted.
+// Run executes the pairing flow. A valid pending pairing (unexpired
+// code + stored verifier) is RESUMED — no new code, no new approval
+// window, no deeplink; a fresh code is minted only when there is
+// nothing to resume (or the resumed one ended in a terminal failure).
+// Returns silently on any failure; on success credentials are saved
+// and the MCP server registration is attempted.
 func Run(configDir string) {
 	if _, ok := api.LoadCredentials(configDir); ok {
 		return
 	}
 	if !acquireLock(configDir) {
-		return
+		return // another poller is live
 	}
 	defer os.Remove(lockPath(configDir))
 
@@ -123,6 +134,17 @@ func Run(configDir string) {
 		return
 	}
 	base := cfg.ResolvedBaseURL()
+
+	if pending, ok := LoadPending(configDir); ok && pending.Verifier != "" && cfg.ClientID != "" {
+		if finishPairing(configDir, cfg, base, pending) {
+			return
+		}
+		// Terminal failure (denied/expired/consumed/timeout): the
+		// pending file is gone; fall through to mint a fresh code.
+		if _, ok := api.LoadCredentials(configDir); ok {
+			return
+		}
+	}
 
 	if cfg.ClientID == "" {
 		id, err := registerClient(base)
@@ -156,25 +178,40 @@ func Run(configDir string) {
 		}
 	}
 
-	pending := PendingFile{Code: pairingCode, ExpiresAt: time.Now().Add(pollTimeout)}
-	if data, err := json.Marshal(pending); err == nil {
-		os.WriteFile(pendingPath(configDir), data, 0o600)
+	pending := PendingFile{
+		Code:      pairingCode,
+		ExpiresAt: time.Now().Add(pollTimeout),
+		Verifier:  verifier,
 	}
+	if data, err := json.Marshal(pending); err == nil {
+		if os.WriteFile(pendingPath(configDir), data, 0o600) != nil {
+			return // resume impossible without the file; don't orphan an approval
+		}
+	}
+	// The deeplink fires only for a freshly minted code — resuming must
+	// never pop a second approval window.
 	openInApp(pairingCode)
 
-	authCode, err := pollForApproval(base, pairingCode)
+	finishPairing(configDir, cfg, base, pending)
+}
+
+// finishPairing polls the pending code until approval, then exchanges
+// the auth code using the pending file's stored verifier. Reports
+// success; on any terminal outcome the pending file is removed.
+func finishPairing(configDir string, cfg api.Config, base string, pending PendingFile) bool {
+	authCode, err := pollForApproval(base, pending.Code, pending.ExpiresAt)
 	if err != nil {
 		os.Remove(pendingPath(configDir))
-		return
+		return false
 	}
 
-	creds, err := exchangeCode(base, cfg.ClientID, authCode, verifier)
+	creds, err := exchangeCode(base, cfg.ClientID, authCode, pending.Verifier)
 	if err != nil {
 		os.Remove(pendingPath(configDir))
-		return
+		return false
 	}
 	if api.SaveCredentials(configDir, creds) != nil {
-		return
+		return false
 	}
 	os.Remove(pendingPath(configDir))
 	os.Remove(shownPath(configDir))
@@ -183,13 +220,13 @@ func Run(configDir string) {
 	// token refresh — the registration header embeds the access token,
 	// so a "registered once" flag could never gate it.
 	RegisterMCPServer(base, creds.AccessToken)
+	return true
 }
 
 func acquireLock(configDir string) bool {
 	os.MkdirAll(configDir, 0o700)
 	path := lockPath(configDir)
-	if info, err := os.Stat(path); err == nil &&
-		time.Since(info.ModTime()) > pollTimeout+time.Minute {
+	if lockIsStale(path) {
 		os.Remove(path)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -202,6 +239,27 @@ func acquireLock(configDir string) bool {
 	fmt.Fprintf(f, "%d", os.Getpid())
 	f.Close()
 	return true
+}
+
+// lockIsStale detects a poller that died without cleanup. The lock
+// stores the holder's PID: if that process is gone (Unix liveness
+// probe; on Windows pidAlive conservatively says "alive"), the lock is
+// reclaimed immediately — otherwise a crashed poller would block the
+// resume for the whole time-based window. The mtime fallback covers
+// Windows and unparseable locks.
+func lockIsStale(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if !pidAlive(pid) {
+				return true
+			}
+		}
+	}
+	return time.Since(info.ModTime()) > pollTimeout+time.Minute
 }
 
 // registerClient performs RFC 7591 dynamic client registration.
@@ -278,10 +336,13 @@ func startAuthorize(base, clientID, challenge string) (string, error) {
 }
 
 // pollForApproval polls GET /oauth/authorize/{code}/status until the
-// user approves in the FocusAlly app. On approval the raw auth code is
-// extracted from the redirectTo URL's `code` query parameter.
-func pollForApproval(base, pairingCode string) (string, error) {
-	deadline := time.Now().Add(pollTimeout)
+// user approves in the FocusAlly app (or the code's own expiry
+// passes). On approval the raw auth code is extracted from the
+// redirectTo URL's `code` query parameter.
+func pollForApproval(base, pairingCode string, deadline time.Time) (string, error) {
+	if cap := time.Now().Add(pollTimeout); deadline.After(cap) {
+		deadline = cap
+	}
 	for time.Now().Before(deadline) {
 		status, redirectTo, err := pollOnce(base, pairingCode)
 		if err == nil {

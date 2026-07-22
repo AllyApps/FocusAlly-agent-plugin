@@ -107,12 +107,16 @@ func runHook(eventName string) {
 // systemMessage carrying the code (systemMessage is shown to the user
 // and never enters model context).
 func surfacePairing(configDir string) {
+	// Always (re)spawn the pairing process: it resumes a persisted
+	// pending pairing after process death/reboot, exits immediately if
+	// a live poller holds the lock, and mints a fresh code only when
+	// there is nothing to resume.
+	spawnSelf("pair")
 	if !pairing.ShouldShowCode(configDir) {
 		return
 	}
 	pending, ok := pairing.LoadPending(configDir)
 	if !ok {
-		spawnSelf("pair")
 		// Minting the code is two fast HTTPS round-trips; 1 s covers
 		// the common case without stretching SessionStart. If the code
 		// is not there yet, show a code-less notice now and the real
