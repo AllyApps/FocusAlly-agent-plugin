@@ -72,11 +72,11 @@ func TestMergeAdjacentIntervalsUnderHandoffGlueGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(ev(WorkEnd, base.Add(1*time.Minute)))
-	// New interval 119 s after the previous closed → still glue noise.
-	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+119*time.Second)))
+	// New interval 29 s after the previous closed → still glue noise.
+	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+29*time.Second)))
 	s.Apply(ev(WorkEnd, base.Add(4*time.Minute)))
 	if len(s.ActiveIntervals) != 1 {
-		t.Fatalf("gap < 2 min must merge, got %d intervals", len(s.ActiveIntervals))
+		t.Fatalf("gap < 30 s must merge, got %d intervals", len(s.ActiveIntervals))
 	}
 	got := s.ActiveIntervals[0]
 	if !got.Start.Time.Equal(base) || !got.End.Time.Equal(base.Add(4*time.Minute)) {
@@ -88,11 +88,11 @@ func TestNoMergeOverHandoffGlueGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(ev(WorkEnd, base.Add(1*time.Minute)))
-	// 121 s gap — past the liveness slack: a real pause, keep the split.
-	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+121*time.Second)))
+	// 31 s gap — a real pause (e.g. the user answering), keep the split.
+	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+31*time.Second)))
 	s.Apply(ev(WorkEnd, base.Add(5*time.Minute)))
 	if len(s.ActiveIntervals) != 2 {
-		t.Fatalf("gap > 2 min must stay separate, got %d intervals", len(s.ActiveIntervals))
+		t.Fatalf("gap > 30 s must stay separate, got %d intervals", len(s.ActiveIntervals))
 	}
 }
 

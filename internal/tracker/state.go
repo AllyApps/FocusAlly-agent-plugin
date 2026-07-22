@@ -4,12 +4,11 @@ import "time"
 
 const (
 	// handoffGlueGap: adjacent intervals separated by less than this
-	// are one continuous stretch of work. Matches the client's
-	// open-interval liveness slack (2 min): a gap shorter than that
-	// carries no signal — it's agent-handoff noise (e.g. a background
-	// agent finishing and the main agent resuming), glued here at the
-	// tracker level so the UI never sees it.
-	handoffGlueGap = 2 * time.Minute
+	// are one continuous stretch of work. Sub-30 s pauses are event
+	// jitter, not a real break; genuine waits (e.g. the user answering
+	// a question) stay visible. Main↔subagent handoffs need no glue —
+	// the subagent refcount keeps the interval open across them.
+	handoffGlueGap = 30 * time.Second
 	// intervalCap bounds the array defensively; oldest intervals drop.
 	intervalCap = 500
 	// flushDebounce: non-forced flushes happen at most this often.
