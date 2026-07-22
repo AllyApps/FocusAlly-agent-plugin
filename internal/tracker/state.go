@@ -3,9 +3,13 @@ package tracker
 import "time"
 
 const (
-	// mergeGap: adjacent intervals separated by less than this are one
-	// continuous stretch of work.
-	mergeGap = 30 * time.Second
+	// handoffGlueGap: adjacent intervals separated by less than this
+	// are one continuous stretch of work. Matches the client's
+	// open-interval liveness slack (2 min): a gap shorter than that
+	// carries no signal — it's agent-handoff noise (e.g. a background
+	// agent finishing and the main agent resuming), glued here at the
+	// tracker level so the UI never sees it.
+	handoffGlueGap = 2 * time.Minute
 	// intervalCap bounds the array defensively; oldest intervals drop.
 	intervalCap = 500
 	// flushDebounce: non-forced flushes happen at most this often.
@@ -83,7 +87,8 @@ func (s *State) closeOpenInterval(at WireTime) {
 }
 
 // normalizeIntervals merges adjacent intervals separated by less than
-// mergeGap and caps the array at intervalCap (keeping the newest).
+// handoffGlueGap and caps the array at intervalCap (keeping the
+// newest).
 func (s *State) normalizeIntervals() {
 	if len(s.ActiveIntervals) < 2 {
 		return
@@ -91,7 +96,7 @@ func (s *State) normalizeIntervals() {
 	merged := s.ActiveIntervals[:1]
 	for _, next := range s.ActiveIntervals[1:] {
 		last := &merged[len(merged)-1]
-		if last.End != nil && next.Start.Sub(last.End.Time) < mergeGap {
+		if last.End != nil && next.Start.Sub(last.End.Time) < handoffGlueGap {
 			last.End = next.End
 			continue
 		}

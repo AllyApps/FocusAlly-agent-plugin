@@ -64,30 +64,35 @@ func TestWorkBeginKeepsExistingOpenInterval(t *testing.T) {
 	}
 }
 
-func TestMergeAdjacentIntervalsUnder30s(t *testing.T) {
+// Gaps shorter than the 2-minute handoff-glue threshold carry no
+// signal (agent-handoff noise, e.g. a background agent finishing and
+// the main agent resuming) — the tracker glues them so the UI never
+// sees them.
+func TestMergeAdjacentIntervalsUnderHandoffGlueGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(ev(WorkEnd, base.Add(1*time.Minute)))
-	// New interval 10 s after the previous closed → merge.
-	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+10*time.Second)))
-	s.Apply(ev(WorkEnd, base.Add(2*time.Minute)))
+	// New interval 119 s after the previous closed → still glue noise.
+	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+119*time.Second)))
+	s.Apply(ev(WorkEnd, base.Add(4*time.Minute)))
 	if len(s.ActiveIntervals) != 1 {
-		t.Fatalf("gap < 30s must merge, got %d intervals", len(s.ActiveIntervals))
+		t.Fatalf("gap < 2 min must merge, got %d intervals", len(s.ActiveIntervals))
 	}
 	got := s.ActiveIntervals[0]
-	if !got.Start.Time.Equal(base) || !got.End.Time.Equal(base.Add(2*time.Minute)) {
+	if !got.Start.Time.Equal(base) || !got.End.Time.Equal(base.Add(4*time.Minute)) {
 		t.Fatalf("merged interval = %+v", got)
 	}
 }
 
-func TestNoMergeOver30s(t *testing.T) {
+func TestNoMergeOverHandoffGlueGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(ev(WorkEnd, base.Add(1*time.Minute)))
-	s.Apply(ev(WorkBegin, base.Add(2*time.Minute)))
-	s.Apply(ev(WorkEnd, base.Add(3*time.Minute)))
+	// 121 s gap — past the liveness slack: a real pause, keep the split.
+	s.Apply(ev(WorkBegin, base.Add(1*time.Minute+121*time.Second)))
+	s.Apply(ev(WorkEnd, base.Add(5*time.Minute)))
 	if len(s.ActiveIntervals) != 2 {
-		t.Fatalf("gap >= 30s must stay separate, got %d intervals", len(s.ActiveIntervals))
+		t.Fatalf("gap > 2 min must stay separate, got %d intervals", len(s.ActiveIntervals))
 	}
 }
 
@@ -111,14 +116,14 @@ func TestIntervalCapAt500(t *testing.T) {
 		s.Apply(ev(WorkBegin, at))
 		at = at.Add(time.Minute)
 		s.Apply(ev(WorkEnd, at))
-		at = at.Add(time.Minute) // 1 min gap > 30 s: no merging
+		at = at.Add(3 * time.Minute) // 3 min gap > 2 min glue: no merging
 	}
 	if len(s.ActiveIntervals) != 500 {
 		t.Fatalf("cap = 500, got %d", len(s.ActiveIntervals))
 	}
 	// Newest are kept: the last interval must end at the final WorkEnd.
 	last := s.ActiveIntervals[len(s.ActiveIntervals)-1]
-	if !last.End.Time.Equal(at.Add(-time.Minute)) {
+	if !last.End.Time.Equal(at.Add(-3 * time.Minute)) {
 		t.Fatalf("cap must drop oldest, last interval = %+v", last)
 	}
 }
