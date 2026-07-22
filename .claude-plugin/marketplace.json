@@ -1,0 +1,13 @@
+{
+  "name": "focusally",
+  "owner": {
+    "name": "FocusAlly"
+  },
+  "plugins": [
+    {
+      "name": "focusally-tracker",
+      "source": "./",
+      "description": "Reports Claude Code session activity to FocusAlly (AI rail in the Day timeline)"
+    }
+  ]
+}
