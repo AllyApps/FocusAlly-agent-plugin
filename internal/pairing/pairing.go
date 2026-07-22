@@ -122,6 +122,7 @@ func FormatCode(code string) string {
 // and the MCP server registration is attempted.
 func Run(configDir string) {
 	if _, ok := api.LoadCredentials(configDir); ok {
+		os.Remove(pendingPath(configDir))
 		return
 	}
 	if !acquireLock(configDir) {
