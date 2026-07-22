@@ -1,0 +1,5 @@
+{
+  "name": "focusally-tracker",
+  "description": "Reports Claude Code session activity to FocusAlly so coding-agent work shows up on the Day timeline. Zero-touch pairing via FocusAlly MCP OAuth.",
+  "version": "0.1.0"
+}

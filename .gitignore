@@ -1,0 +1,3 @@
+# Host development build (bin/ IS committed — see Makefile build-all).
+/tracker
+.DS_Store
