@@ -15,8 +15,16 @@ const (
 	// Heartbeat refreshes lastActivityAt and opens an interval if none
 	// is open (covers resumed sessions and long turns).
 	Heartbeat
-	// WorkEnd closes the open interval (agent finished its turn).
+	// WorkEnd marks the main agent's turn as finished. The open
+	// interval closes only once no subagents are alive either.
 	WorkEnd
+	// SubagentBegin marks a spawned subagent (live-subagent refcount
+	// +1). A working subagent IS activity: opens an interval if none.
+	SubagentBegin
+	// SubagentEnd marks a finished subagent (refcount -1, floor 0).
+	// Brings the session to rest — and closes the interval — only if
+	// the main agent has also stopped.
+	SubagentEnd
 	// SessionFinish closes the open interval and stamps endedAt.
 	SessionFinish
 )
@@ -27,5 +35,9 @@ type Event struct {
 	AgentKind   string
 	SessionID   string
 	ProjectPath string
-	At          time.Time
+	// FromSubagent marks events fired inside a subagent call (the
+	// Claude payload carries agent_id there). Subagent heartbeats must
+	// not clear the main agent's stopped flag.
+	FromSubagent bool
+	At           time.Time
 }

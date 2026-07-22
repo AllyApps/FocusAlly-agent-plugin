@@ -20,6 +20,10 @@ type Payload struct {
 	SessionID     string `json:"session_id"`
 	CWD           string `json:"cwd"`
 	HookEventName string `json:"hook_event_name"`
+	// AgentID is present only when the hook fires inside a subagent
+	// call — its presence distinguishes subagent tool calls from
+	// main-thread ones (per the hooks doc).
+	AgentID string `json:"agent_id"`
 }
 
 // MapEvent translates a hook invocation into a tracker event.
@@ -45,6 +49,10 @@ func MapEvent(eventName string, raw []byte, now time.Time) (tracker.Event, error
 		kind = tracker.WorkBegin
 	case "PreToolUse", "PostToolUse":
 		kind = tracker.Heartbeat
+	case "SubagentStart":
+		kind = tracker.SubagentBegin
+	case "SubagentStop":
+		kind = tracker.SubagentEnd
 	case "Stop":
 		kind = tracker.WorkEnd
 	case "SessionEnd":
@@ -54,10 +62,11 @@ func MapEvent(eventName string, raw []byte, now time.Time) (tracker.Event, error
 	}
 
 	return tracker.Event{
-		Kind:        kind,
-		AgentKind:   AgentKind,
-		SessionID:   p.SessionID,
-		ProjectPath: p.CWD,
-		At:          now,
+		Kind:         kind,
+		AgentKind:    AgentKind,
+		SessionID:    p.SessionID,
+		ProjectPath:  p.CWD,
+		FromSubagent: p.AgentID != "",
+		At:           now,
 	}, nil
 }

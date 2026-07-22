@@ -83,8 +83,9 @@ func runHook(eventName string) {
 				state.MachineName = host
 			}
 		}
-		state.Apply(ev)
-		if paired && state.DecideFlush(ev.Kind.ForcesFlush(), time.Now()) == tracker.FlushNow {
+		closedInterval := state.Apply(ev)
+		force := ev.Kind.ForcesFlush() || closedInterval
+		if paired && state.DecideFlush(force, time.Now()) == tracker.FlushNow {
 			flush = true
 			state.MarkFlushSpawned(time.Now())
 		}

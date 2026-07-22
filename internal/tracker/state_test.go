@@ -140,6 +140,151 @@ func TestSessionFinishClosesAndStampsEndedAt(t *testing.T) {
 	}
 }
 
+func subEv(kind EventKind, at time.Time) Event {
+	e := ev(kind, at)
+	e.FromSubagent = true
+	return e
+}
+
+// The root cause of handoff gaps: the main agent's Stop used to close
+// the interval while background subagents were still working, and
+// their next tool call reopened it. With the refcount, Stop keeps the
+// interval open while subagents are alive.
+func TestStopWithLiveSubagentsKeepsIntervalOpen(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	closed := s.Apply(ev(WorkEnd, base.Add(2*time.Minute)))
+	if closed {
+		t.Fatal("Stop with a live subagent must not report an interval close")
+	}
+	if s.openInterval() == nil {
+		t.Fatal("Stop with a live subagent must keep the interval open")
+	}
+	if !s.MainStopped {
+		t.Fatal("Stop must set MainStopped")
+	}
+	if !s.LastActivityAt.Time.Equal(base.Add(2 * time.Minute)) {
+		t.Fatal("Stop must still refresh lastActivityAt")
+	}
+}
+
+func TestSubagentStopToZeroAfterMainStopClosesInterval(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	s.Apply(subEv(SubagentBegin, base.Add(2*time.Minute)))
+	s.Apply(ev(WorkEnd, base.Add(3*time.Minute)))
+
+	if closed := s.Apply(subEv(SubagentEnd, base.Add(4*time.Minute))); closed {
+		t.Fatal("first SubagentStop (count 2→1) must not close")
+	}
+	closed := s.Apply(subEv(SubagentEnd, base.Add(5*time.Minute)))
+	if !closed || s.openInterval() != nil {
+		t.Fatal("SubagentStop bringing the count to 0 after main Stop must close the interval")
+	}
+	if end := s.ActiveIntervals[len(s.ActiveIntervals)-1].End; !end.Time.Equal(base.Add(5 * time.Minute)) {
+		t.Fatalf("interval closed at %v", end.Time)
+	}
+}
+
+func TestSubagentStopToZeroBeforeMainStopKeepsIntervalOpen(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	s.Apply(subEv(SubagentEnd, base.Add(2*time.Minute)))
+	if s.openInterval() == nil {
+		t.Fatal("subagents done but main still working — interval stays open")
+	}
+}
+
+func TestSubagentStartAfterStopContinuesWork(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(ev(WorkEnd, base.Add(1*time.Minute)))
+	// A subagent spawning right after Stop is activity again; the
+	// sub-glue-gap reopen merges into the same interval.
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute+10*time.Second)))
+	if s.openInterval() == nil {
+		t.Fatal("SubagentStart after Stop must reopen an interval")
+	}
+	if len(s.ActiveIntervals) != 1 {
+		t.Fatalf("sub-glue-gap reopen must merge, got %d intervals", len(s.ActiveIntervals))
+	}
+	// Main is still stopped: the subagent finishing brings rest.
+	if closed := s.Apply(subEv(SubagentEnd, base.Add(2*time.Minute))); !closed {
+		t.Fatal("last subagent finishing with main stopped must close")
+	}
+}
+
+func TestSubagentHeartbeatDoesNotClearMainStopped(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	s.Apply(ev(WorkEnd, base.Add(2*time.Minute)))
+	s.Apply(subEv(Heartbeat, base.Add(3*time.Minute)))
+	if !s.MainStopped {
+		t.Fatal("subagent heartbeat must not clear MainStopped")
+	}
+	s.Apply(ev(Heartbeat, base.Add(4*time.Minute)))
+	if s.MainStopped {
+		t.Fatal("main-thread heartbeat must clear MainStopped")
+	}
+}
+
+func TestSessionStartResetsSubagentCount(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	s.Apply(subEv(SubagentBegin, base.Add(2*time.Minute)))
+	s.Apply(ev(WorkEnd, base.Add(3*time.Minute)))
+
+	// Resume (e.g. after crash — SubagentStop events were lost).
+	s.Apply(ev(SessionBegin, base.Add(10*time.Minute)))
+	if s.SubagentCount != 0 || s.MainStopped {
+		t.Fatalf("SessionStart must reset refcount and MainStopped: %+v", s)
+	}
+	s.Apply(ev(WorkBegin, base.Add(11*time.Minute)))
+	if closed := s.Apply(ev(WorkEnd, base.Add(12*time.Minute))); !closed {
+		t.Fatal("after the reset, Stop with no subagents must close normally")
+	}
+}
+
+// Drift scenario: a SubagentStop was lost (killed process), the
+// refcount is stuck > 0, and Stop therefore leaves the interval open
+// in STATE. This is accepted: the client clips an open interval to
+// lastActivityAt + 2 min and treats the session as ended after 30 min
+// of silence, so rendering damage is bounded; the next SessionStart
+// resets the count.
+func TestDriftStuckRefcountLeavesIntervalOpenButClientClipBounds(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(1*time.Minute)))
+	// SubagentStop never arrives.
+	s.Apply(ev(WorkEnd, base.Add(2*time.Minute)))
+	if s.openInterval() == nil {
+		t.Fatal("stuck refcount keeps the interval open in state (by design)")
+	}
+	// Nothing in the tracker mutates state without an event — the open
+	// interval's rendered extent is bounded client-side by
+	// lastActivityAt, which stays frozen at the last real event.
+	if !s.LastActivityAt.Time.Equal(base.Add(2 * time.Minute)) {
+		t.Fatal("lastActivityAt must stay at the last real event")
+	}
+}
+
+func TestSubagentEndFloorsAtZero(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentEnd, base.Add(time.Minute))) // drift: never started
+	if s.SubagentCount != 0 {
+		t.Fatalf("refcount must floor at 0, got %d", s.SubagentCount)
+	}
+	if s.openInterval() == nil {
+		t.Fatal("MainStopped is false — interval must stay open")
+	}
+}
+
 func TestFlushDebounce(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))

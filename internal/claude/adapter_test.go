@@ -29,6 +29,8 @@ func TestMapEventFixtures(t *testing.T) {
 		{"session_start.json", "SessionStart", tracker.SessionBegin},
 		{"user_prompt_submit.json", "UserPromptSubmit", tracker.WorkBegin},
 		{"post_tool_use.json", "PostToolUse", tracker.Heartbeat},
+		{"subagent_start.json", "SubagentStart", tracker.SubagentBegin},
+		{"subagent_stop.json", "SubagentStop", tracker.SubagentEnd},
 		{"stop.json", "Stop", tracker.WorkEnd},
 		{"session_end.json", "SessionEnd", tracker.SessionFinish},
 	}
@@ -72,6 +74,24 @@ func TestSubagentEventSharesParentSession(t *testing.T) {
 	}
 	if sub.Kind != tracker.Heartbeat {
 		t.Fatalf("subagent event kind = %d, want Heartbeat", sub.Kind)
+	}
+}
+
+// agent_id is present only inside subagent calls (hooks doc) — the
+// adapter uses it to flag subagent tool calls so they never clear the
+// main agent's stopped state.
+func TestFromSubagentFlagFollowsAgentID(t *testing.T) {
+	main, _ := MapEvent("PostToolUse", fixture(t, "post_tool_use.json"), now)
+	if main.FromSubagent {
+		t.Fatal("main-thread tool call must not be flagged FromSubagent")
+	}
+	sub, _ := MapEvent("PostToolUse", fixture(t, "post_tool_use_subagent.json"), now)
+	if !sub.FromSubagent {
+		t.Fatal("tool call with agent_id must be flagged FromSubagent")
+	}
+	subStart, _ := MapEvent("SubagentStart", fixture(t, "subagent_start.json"), now)
+	if !subStart.FromSubagent {
+		t.Fatal("SubagentStart carries agent_id and must be flagged")
 	}
 }
 

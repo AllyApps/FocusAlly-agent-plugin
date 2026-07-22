@@ -35,13 +35,22 @@ type State struct {
 	EndedAt           *WireTime  `json:"endedAt,omitempty"`
 	ActiveIntervals   []Interval `json:"activeIntervals"`
 
+	// SubagentCount is the live-subagent refcount: the main agent's
+	// Stop must not close the interval while subagents still work.
+	SubagentCount int `json:"subagentCount,omitempty"`
+	// MainStopped remembers that the main agent finished its turn, so
+	// the SubagentEnd that brings the refcount to zero knows to close
+	// the interval. Cleared by main-thread activity only.
+	MainStopped bool `json:"mainStopped,omitempty"`
+
 	Dirty       bool      `json:"dirty"`
 	LastFlushAt *WireTime `json:"lastFlushAt,omitempty"`
 }
 
-// Apply folds one event into the state. A zero-value State is a valid
-// target for the first event of a session.
-func (s *State) Apply(ev Event) {
+// Apply folds one event into the state and reports whether it closed
+// the open interval (a natural force-flush moment). A zero-value State
+// is a valid target for the first event of a session.
+func (s *State) Apply(ev Event) (closedInterval bool) {
 	at := WireTimeOf(ev.At)
 	if s.ExternalSessionID == "" {
 		s.ExternalSessionID = ev.SessionID
@@ -56,18 +65,43 @@ func (s *State) Apply(ev Event) {
 
 	switch ev.Kind {
 	case SessionBegin:
-		// Session boundaries only; no interval work.
+		// Session boundaries only; no interval work. Reset the
+		// refcount — missed SubagentStop events (crash, kill) must not
+		// leak a stuck count into the resumed session.
+		s.SubagentCount = 0
+		s.MainStopped = false
 	case WorkBegin, Heartbeat:
+		if !ev.FromSubagent {
+			s.MainStopped = false
+		}
 		if s.openInterval() == nil {
 			s.ActiveIntervals = append(s.ActiveIntervals, Interval{Start: at})
 		}
+	case SubagentBegin:
+		s.SubagentCount++
+		if s.openInterval() == nil {
+			s.ActiveIntervals = append(s.ActiveIntervals, Interval{Start: at})
+		}
+	case SubagentEnd:
+		if s.SubagentCount > 0 {
+			s.SubagentCount--
+		}
+		if s.SubagentCount == 0 && s.MainStopped {
+			closedInterval = s.closeOpenInterval(at)
+		}
 	case WorkEnd:
-		s.closeOpenInterval(at)
+		s.MainStopped = true
+		if s.SubagentCount == 0 {
+			closedInterval = s.closeOpenInterval(at)
+		}
+		// Otherwise the session is still working through its
+		// subagents — keep the interval open, refresh activity only.
 	case SessionFinish:
-		s.closeOpenInterval(at)
+		closedInterval = s.closeOpenInterval(at)
 		s.EndedAt = &at
 	}
 	s.normalizeIntervals()
+	return closedInterval
 }
 
 func (s *State) openInterval() *Interval {
@@ -77,13 +111,16 @@ func (s *State) openInterval() *Interval {
 	return nil
 }
 
-func (s *State) closeOpenInterval(at WireTime) {
-	if open := s.openInterval(); open != nil {
-		if at.Before(open.Start.Time) {
-			at = open.Start
-		}
-		open.End = &at
+func (s *State) closeOpenInterval(at WireTime) bool {
+	open := s.openInterval()
+	if open == nil {
+		return false
 	}
+	if at.Before(open.Start.Time) {
+		at = open.Start
+	}
+	open.End = &at
+	return true
 }
 
 // normalizeIntervals merges adjacent intervals separated by less than
@@ -148,7 +185,9 @@ func (s *State) MarkFlushed(snapshotLastActivity WireTime) {
 }
 
 // ForcesFlush reports whether the event kind requires an immediate
-// flush regardless of the debounce window.
+// flush regardless of the debounce window. Interval closes signalled
+// by Apply's return value additionally force a flush (e.g. the
+// SubagentEnd that brings the session to rest).
 func (k EventKind) ForcesFlush() bool {
 	return k == WorkEnd || k == SessionFinish
 }
