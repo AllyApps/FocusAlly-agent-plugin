@@ -1,6 +1,6 @@
 //go:build !windows
 
-package pairing
+package proc
 
 import (
 	"errors"
@@ -8,9 +8,9 @@ import (
 	"syscall"
 )
 
-// pidAlive probes process existence with signal 0 (kill -0 style).
+// PidAlive probes process existence with signal 0 (kill -0 style).
 // EPERM means the process exists but belongs to someone else — alive.
-func pidAlive(pid int) bool {
+func PidAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "focusally": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-mcp.sh"
+    }
+  }
+}

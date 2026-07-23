@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/withally/focusally-agent-plugin/internal/api"
+	"github.com/withally/focusally-agent-plugin/internal/proc"
 )
 
 const (
@@ -46,7 +47,11 @@ const (
 	// arrives via the status poll, not a browser redirect).
 	RedirectURI = "http://localhost/focusally-tracker/callback"
 
-	Scope      = "agent:write"
+	// Scope requests the full tool surface in one approval: the same
+	// token powers hook tracking AND every interactive MCP tool, so a
+	// re-login via auth.login loses nothing. The user can narrow
+	// scopes per-key in the app afterwards.
+	Scope      = "sessions:read sessions:write tasks:read tasks:write priorities:read priorities:write devices:read sync:read agent:write"
 	ClientName = "FocusAlly Agent Tracker"
 	SoftwareID = "focusally-agent-plugin"
 
@@ -54,7 +59,7 @@ const (
 	pollTimeout  = 15 * time.Minute
 	// codeShowThrottle limits how often the SessionStart hook re-shows
 	// the pairing message while unpaired.
-	codeShowThrottle = time.Hour
+	codeShowThrottle = 24 * time.Hour
 )
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
@@ -90,7 +95,7 @@ func LoadPending(configDir string) (PendingFile, bool) {
 }
 
 // ShouldShowCode throttles the user-visible SessionStart message to at
-// most once per hour while unpaired.
+// most once per day while unpaired.
 func ShouldShowCode(configDir string) bool {
 	info, err := os.Stat(shownPath(configDir))
 	if err != nil {
@@ -114,14 +119,46 @@ func FormatCode(code string) string {
 	return code
 }
 
+// Bootstrap makes sure a detached pairing poller is running for the
+// profile and returns the current pending code, waiting up to wait for
+// a fresh mint to land. One code path serves both the SessionStart
+// hook message and the auth.login MCP tool. spawn re-execs the tracker
+// binary (injectable for tests).
+func Bootstrap(configDir, profile string, spawn func(args ...string), wait time.Duration) (PendingFile, bool) {
+	// Always (re)spawn: the poller resumes a persisted pending pairing
+	// after process death/reboot, exits immediately if a live poller
+	// holds the lock, and mints a fresh code only when there is nothing
+	// to resume.
+	if spawn != nil {
+		spawn("pair", "--profile", profile)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if p, ok := LoadPending(configDir); ok {
+			return p, true
+		}
+		if !time.Now().Before(deadline) {
+			return PendingFile{}, false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Run executes the pairing flow. A valid pending pairing (unexpired
 // code + stored verifier) is RESUMED — no new code, no new approval
 // window, no deeplink; a fresh code is minted only when there is
 // nothing to resume (or the resumed one ended in a terminal failure).
-// Returns silently on any failure; on success credentials are saved
-// and the MCP server registration is attempted.
+// Returns silently on any failure; on success credentials are saved —
+// the plugin-declared MCP server picks them up from disk, so pairing
+// ends here.
 func Run(configDir string) {
-	if _, ok := api.LoadCredentials(configDir); ok {
+	cfg, err := api.LoadConfig(configDir)
+	if err != nil {
+		return
+	}
+	base := cfg.ResolvedBaseURL()
+
+	if _, ok := api.LoadCredentialsBound(configDir, base); ok {
 		os.Remove(pendingPath(configDir))
 		return
 	}
@@ -130,19 +167,13 @@ func Run(configDir string) {
 	}
 	defer os.Remove(lockPath(configDir))
 
-	cfg, err := api.LoadConfig(configDir)
-	if err != nil {
-		return
-	}
-	base := cfg.ResolvedBaseURL()
-
 	if pending, ok := LoadPending(configDir); ok && pending.Verifier != "" && cfg.ClientID != "" {
 		if finishPairing(configDir, cfg, base, pending) {
 			return
 		}
 		// Terminal failure (denied/expired/consumed/timeout): the
 		// pending file is gone; fall through to mint a fresh code.
-		if _, ok := api.LoadCredentials(configDir); ok {
+		if _, ok := api.LoadCredentialsBound(configDir, base); ok {
 			return
 		}
 	}
@@ -211,16 +242,11 @@ func finishPairing(configDir string, cfg api.Config, base string, pending Pendin
 		os.Remove(pendingPath(configDir))
 		return false
 	}
-	if api.SaveCredentials(configDir, creds) != nil {
+	if api.SaveCredentials(configDir, base, creds) != nil {
 		return false
 	}
 	os.Remove(pendingPath(configDir))
 	os.Remove(shownPath(configDir))
-
-	// Registration runs on every successful pairing and after every
-	// token refresh — the registration header embeds the access token,
-	// so a "registered once" flag could never gate it.
-	RegisterMCPServer(base, creds.AccessToken)
 	return true
 }
 
@@ -244,7 +270,7 @@ func acquireLock(configDir string) bool {
 
 // lockIsStale detects a poller that died without cleanup. The lock
 // stores the holder's PID: if that process is gone (Unix liveness
-// probe; on Windows pidAlive conservatively says "alive"), the lock is
+// probe; on Windows PidAlive conservatively says "alive"), the lock is
 // reclaimed immediately — otherwise a crashed poller would block the
 // resume for the whole time-based window. The mtime fallback covers
 // Windows and unparseable locks.
@@ -255,7 +281,7 @@ func lockIsStale(path string) bool {
 	}
 	if data, err := os.ReadFile(path); err == nil {
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-			if !pidAlive(pid) {
+			if !proc.PidAlive(pid) {
 				return true
 			}
 		}
@@ -422,27 +448,4 @@ func openInApp(pairingCode string) {
 	cmd := exec.Command("open", link)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	_ = cmd.Run()
-}
-
-// RegisterMCPServer runs `claude mcp add` so the same token also powers
-// the interactive MCP tools. Skips silently when `claude` is not on
-// PATH. Called on first pairing and again after each token refresh
-// (the registration header embeds the access token, which rotates).
-func RegisterMCPServer(base, accessToken string) bool {
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		return false
-	}
-	// Re-adding an existing name fails; drop any previous registration
-	// first (errors ignored — it usually just doesn't exist yet).
-	remove := exec.Command(claudeBin, "mcp", "remove", "-s", "user", "focusally")
-	remove.Stdout, remove.Stderr = nil, nil
-	_ = remove.Run()
-	cmd := exec.Command(claudeBin,
-		"mcp", "add", "--transport", "http", "-s", "user",
-		"focusally", base+"/mcp",
-		"--header", "Authorization: Bearer "+accessToken,
-	)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	return cmd.Run() == nil
 }

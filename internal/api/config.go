@@ -10,7 +10,7 @@ import (
 
 const DefaultBaseURL = "https://focus.withally.app"
 
-// Config lives at <config-dir>/focusally/config.json. BaseURL override
+// Config lives at <profile-config-dir>/config.json. BaseURL override
 // exists for testing against a dev stack.
 type Config struct {
 	BaseURL  string `json:"baseUrl,omitempty"`
@@ -24,12 +24,18 @@ func (c Config) ResolvedBaseURL() string {
 	return DefaultBaseURL
 }
 
-// Credentials live at <config-dir>/focusally/credentials.json (0600).
+// Credentials live at <profile-config-dir>/credentials.json (0600).
 type Credentials struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	// ExpiresAt is unix seconds when the access token expires.
 	ExpiresAt int64 `json:"expiresAt"`
+	// BaseURL records which backend issued this token pair. A profile
+	// whose resolved base URL no longer matches reads as unpaired, so
+	// data can never flow to the wrong backend. Empty = legacy
+	// credentials migrated from the flat layout (bound to the profile's
+	// current base; stamped on the next save).
+	BaseURL string `json:"baseUrl,omitempty"`
 }
 
 // NearExpiry reports whether the access token is expired or about to
@@ -60,12 +66,61 @@ func LoadCredentials(configDir string) (Credentials, bool) {
 	return c, true
 }
 
-func SaveCredentials(configDir string, c Credentials) error {
+// LoadCredentialsBound loads credentials only if they were issued by
+// wantBaseURL. A stored binding to a different backend reads as
+// unpaired — better no data than data sent to the wrong place.
+func LoadCredentialsBound(configDir, wantBaseURL string) (Credentials, bool) {
+	c, ok := LoadCredentials(configDir)
+	if !ok {
+		return Credentials{}, false
+	}
+	if c.BaseURL != "" && c.BaseURL != wantBaseURL {
+		return Credentials{}, false
+	}
+	return c, true
+}
+
+// SaveCredentials persists the pair, always stamping the issuing
+// backend's base URL.
+func SaveCredentials(configDir, baseURL string, c Credentials) error {
+	c.BaseURL = baseURL
 	return saveJSON(CredentialsPath(configDir), c, 0o600)
 }
 
 func DeleteCredentials(configDir string) {
 	os.Remove(CredentialsPath(configDir))
+}
+
+// GlobalConfig lives at <root-config-dir>/tracker.json and holds
+// profile-independent settings.
+type GlobalConfig struct {
+	// TrackingProfile names the ONE profile Claude Code hook tracking
+	// writes to. Empty means "default"; the literal "none" disables
+	// tracking entirely (MCP-only mode).
+	TrackingProfile string `json:"trackingProfile,omitempty"`
+}
+
+// TrackingDisabled is the TrackingProfile value that switches hook
+// tracking off entirely.
+const TrackingDisabled = "none"
+
+func (g GlobalConfig) ResolvedTrackingProfile() string {
+	if g.TrackingProfile == "" {
+		return "default"
+	}
+	return g.TrackingProfile
+}
+
+func globalConfigPath(rootDir string) string { return filepath.Join(rootDir, "tracker.json") }
+
+func LoadGlobalConfig(rootDir string) (GlobalConfig, error) {
+	var g GlobalConfig
+	err := loadJSON(globalConfigPath(rootDir), &g)
+	return g, err
+}
+
+func SaveGlobalConfig(rootDir string, g GlobalConfig) error {
+	return saveJSON(globalConfigPath(rootDir), g, 0o600)
 }
 
 func loadJSON(path string, out any) error {

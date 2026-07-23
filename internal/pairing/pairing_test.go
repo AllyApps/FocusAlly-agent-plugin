@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/withally/focusally-agent-plugin/internal/api"
+	"github.com/withally/focusally-agent-plugin/internal/proc"
 )
 
 // Mirrors the backend's OAuthConsentPage.render output: the raw pairing
@@ -126,7 +127,7 @@ func TestStaleLockWithDeadPidIsReclaimed(t *testing.T) {
 		t.Skipf("cannot spawn helper process: %v", err)
 	}
 	deadPid := dead.ProcessState.Pid()
-	if pidAlive(deadPid) {
+	if proc.PidAlive(deadPid) {
 		t.Skipf("pid %d unexpectedly alive (reused?)", deadPid)
 	}
 	os.WriteFile(lockPath(configDir), []byte(fmt.Sprint(deadPid)), 0o600) // fresh mtime
