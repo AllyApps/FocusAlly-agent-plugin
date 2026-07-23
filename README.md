@@ -10,17 +10,27 @@ hooks and as an MCP stdio server.
 
 ## Install
 
-Prototype (local checkout):
+**Agent-driven (recommended, zero manual steps).** Paste this into any
+Claude Code session:
 
-```bash
-claude --plugin-dir /path/to/FocusAlly-agent-plugin
-```
+> Set up FocusAlly MCP and tracking for me. Follow the instructions at
+> https://raw.githubusercontent.com/AllyApps/FocusAlly-agent-plugin/main/AGENT_SETUP.md
 
-Marketplace:
+The agent installs the plugin, enables auto-update, and prints a
+pairing code; the user only approves that code in the FocusAlly app
+([AGENT_SETUP.md](AGENT_SETUP.md)).
+
+Manual, via marketplace:
 
 ```
 /plugin marketplace add AllyApps/FocusAlly-agent-plugin
 /plugin install focusally
+```
+
+Prototype (local checkout):
+
+```bash
+claude --plugin-dir /path/to/FocusAlly-agent-plugin
 ```
 
 Nothing else — the plugin installs both halves with zero manual steps:
