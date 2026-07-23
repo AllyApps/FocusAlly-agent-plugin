@@ -24,6 +24,10 @@ type Payload struct {
 	// call — its presence distinguishes subagent tool calls from
 	// main-thread ones (per the hooks doc).
 	AgentID string `json:"agent_id"`
+	// ToolName names the tool a PreToolUse/PostToolUse hook fired for.
+	// A blocking question tool (AskUserQuestion/ExitPlanMode) marks the
+	// start of a user-answer wait.
+	ToolName string `json:"tool_name"`
 }
 
 // MapEvent translates a hook invocation into a tracker event.
@@ -47,7 +51,13 @@ func MapEvent(eventName string, raw []byte, now time.Time) (tracker.Event, error
 		kind = tracker.SessionBegin
 	case "UserPromptSubmit":
 		kind = tracker.WorkBegin
-	case "PreToolUse", "PostToolUse":
+	case "PreToolUse":
+		if p.ToolName == "AskUserQuestion" || p.ToolName == "ExitPlanMode" {
+			kind = tracker.AwaitBegin
+		} else {
+			kind = tracker.Heartbeat
+		}
+	case "PostToolUse":
 		kind = tracker.Heartbeat
 	case "SubagentStart":
 		kind = tracker.SubagentBegin

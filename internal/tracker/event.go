@@ -27,6 +27,11 @@ const (
 	SubagentEnd
 	// SessionFinish closes the open interval and stamps endedAt.
 	SessionFinish
+	// AwaitBegin records the start of a blocking user-answer wait (the
+	// agent asked a question via AskUserQuestion/ExitPlanMode). It only
+	// stamps the wait-start; it never opens or closes an interval by
+	// itself — the split is decided on the next event.
+	AwaitBegin
 )
 
 // Event is one agent activity observation.

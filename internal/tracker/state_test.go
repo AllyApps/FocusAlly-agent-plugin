@@ -285,6 +285,97 @@ func TestSubagentEndFloorsAtZero(t *testing.T) {
 	}
 }
 
+// A user-answer wait longer than awaitSplitGap splits the work
+// interval: it closes at the question time (AwaitBegin) and reopens at
+// the answer time (the question tool's PostToolUse → Heartbeat).
+func TestAwaitSplitOverThreshold(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
+	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
+		t.Fatalf("AwaitBegin must not itself split the interval: %+v", s.ActiveIntervals)
+	}
+	closed := s.Apply(ev(Heartbeat, base.Add(21*time.Minute)))
+	if !closed {
+		t.Fatal("a wait over the threshold must report an interval close (forces a flush)")
+	}
+	if len(s.ActiveIntervals) != 2 {
+		t.Fatalf("wait > 30 s must split into two intervals, got %d: %+v", len(s.ActiveIntervals), s.ActiveIntervals)
+	}
+	if end := s.ActiveIntervals[0].End; end == nil || !end.Time.Equal(base.Add(1*time.Minute)) {
+		t.Fatalf("first interval must end at the question time: %+v", s.ActiveIntervals[0])
+	}
+	if second := s.ActiveIntervals[1]; second.End != nil || !second.Start.Time.Equal(base.Add(21*time.Minute)) {
+		t.Fatalf("second interval must open at the answer time: %+v", second)
+	}
+	if s.AwaitingSince != nil {
+		t.Fatal("AwaitingSince must be cleared after the resume")
+	}
+}
+
+// A wait at or under awaitSplitGap is answer latency, not a real
+// break — the interval stays continuous.
+func TestAwaitNoSplitUnderThreshold(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
+	closed := s.Apply(ev(Heartbeat, base.Add(1*time.Minute+15*time.Second)))
+	if closed {
+		t.Fatal("a wait under the threshold must not close the interval")
+	}
+	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
+		t.Fatalf("wait <= 30 s must stay one open interval: %+v", s.ActiveIntervals)
+	}
+	if s.AwaitingSince != nil {
+		t.Fatal("AwaitingSince must be cleared even when no split happens")
+	}
+}
+
+// A long gap between two Heartbeats with no AwaitBegin (e.g. a slow
+// non-blocking Bash build) must never split — only a genuine
+// user-answer wait does.
+func TestNoAwaitNoSplitOnLongHeartbeatGap(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	closed := s.Apply(ev(Heartbeat, base.Add(45*time.Second)))
+	if closed {
+		t.Fatal("a Heartbeat gap without AwaitBegin must not close the interval")
+	}
+	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
+		t.Fatalf("slow tool (no AwaitBegin) must stay one open interval: %+v", s.ActiveIntervals)
+	}
+}
+
+// A subagent working through the wait keeps the interval open — the
+// refcount, not the wait, governs rest.
+func TestAwaitNoSplitWhileSubagentActive(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(subEv(SubagentBegin, base.Add(30*time.Second)))
+	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
+	closed := s.Apply(ev(Heartbeat, base.Add(21*time.Minute)))
+	if closed {
+		t.Fatal("a live subagent must suppress the await split")
+	}
+	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
+		t.Fatalf("split must not happen while a subagent is active: %+v", s.ActiveIntervals)
+	}
+	if s.AwaitingSince != nil {
+		t.Fatal("AwaitingSince must be cleared even when the split is suppressed")
+	}
+}
+
+// A missed resume must not leak a pending wait into a resumed session.
+func TestSessionBeginClearsPendingAwait(t *testing.T) {
+	var s State
+	s.Apply(ev(WorkBegin, base))
+	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
+	s.Apply(ev(SessionBegin, base.Add(2*time.Minute)))
+	if s.AwaitingSince != nil {
+		t.Fatal("SessionBegin must clear a pending await")
+	}
+}
+
 func TestFlushDebounce(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))

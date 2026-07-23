@@ -9,6 +9,12 @@ const (
 	// a question) stay visible. Main↔subagent handoffs need no glue —
 	// the subagent refcount keeps the interval open across them.
 	handoffGlueGap = 30 * time.Second
+	// awaitSplitGap: a genuine user-answer wait (AskUserQuestion /
+	// ExitPlanMode) longer than this splits the work interval so the
+	// pause stays visible. Invariant: awaitSplitGap >= handoffGlueGap,
+	// so a gap the split produces (> 30 s) is never re-glued by
+	// normalizeIntervals (which merges only gaps < handoffGlueGap).
+	awaitSplitGap = 30 * time.Second
 	// intervalCap bounds the array defensively; oldest intervals drop.
 	intervalCap = 500
 	// flushDebounce: non-forced flushes happen at most this often.
@@ -41,6 +47,10 @@ type State struct {
 	// the SubagentEnd that brings the refcount to zero knows to close
 	// the interval. Cleared by main-thread activity only.
 	MainStopped bool `json:"mainStopped,omitempty"`
+	// AwaitingSince marks the start of a pending user-answer wait (the
+	// question's PreToolUse time). The next event decides whether the
+	// wait was long enough to split the interval; cleared either way.
+	AwaitingSince *WireTime `json:"awaitingSince,omitempty"`
 
 	Dirty       bool      `json:"dirty"`
 	LastFlushAt *WireTime `json:"lastFlushAt,omitempty"`
@@ -62,6 +72,20 @@ func (s *State) Apply(ev Event) (closedInterval bool) {
 	s.LastActivityAt = at
 	s.Dirty = true
 
+	// A pending user-answer wait resolves on the next event. If the
+	// wait outlasted awaitSplitGap (and no subagent kept working
+	// through it), close the open interval back at the question time so
+	// the pause stays visible; the same event then reopens a fresh
+	// interval at the answer time via its Heartbeat.
+	if ev.Kind != AwaitBegin && s.AwaitingSince != nil {
+		if at.Sub(s.AwaitingSince.Time) > awaitSplitGap && s.SubagentCount == 0 {
+			if s.closeOpenInterval(*s.AwaitingSince) {
+				closedInterval = true
+			}
+		}
+		s.AwaitingSince = nil
+	}
+
 	switch ev.Kind {
 	case SessionBegin:
 		// Session boundaries only; no interval work. Reset the
@@ -69,6 +93,12 @@ func (s *State) Apply(ev Event) (closedInterval bool) {
 		// leak a stuck count into the resumed session.
 		s.SubagentCount = 0
 		s.MainStopped = false
+		s.AwaitingSince = nil
+	case AwaitBegin:
+		// Stamp the wait-start only; the interval stays open through
+		// the wait and the split is decided on the next event.
+		v := at
+		s.AwaitingSince = &v
 	case WorkBegin, Heartbeat:
 		if !ev.FromSubagent {
 			s.MainStopped = false

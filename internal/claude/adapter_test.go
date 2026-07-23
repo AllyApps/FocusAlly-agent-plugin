@@ -28,6 +28,9 @@ func TestMapEventFixtures(t *testing.T) {
 	}{
 		{"session_start.json", "SessionStart", tracker.SessionBegin},
 		{"user_prompt_submit.json", "UserPromptSubmit", tracker.WorkBegin},
+		{"pre_tool_use_ask.json", "PreToolUse", tracker.AwaitBegin},
+		{"pre_tool_use_plan.json", "PreToolUse", tracker.AwaitBegin},
+		{"pre_tool_use_bash.json", "PreToolUse", tracker.Heartbeat},
 		{"post_tool_use.json", "PostToolUse", tracker.Heartbeat},
 		{"subagent_start.json", "SubagentStart", tracker.SubagentBegin},
 		{"subagent_stop.json", "SubagentStop", tracker.SubagentEnd},

@@ -1,0 +1,9 @@
+{
+  "session_id": "3f8f2b1c-9a7d-4e21-b3aa-6c1a0f9d2e55",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/3f8f2b1c.jsonl",
+  "cwd": "/Users/dev/Projects/FocusAlly",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {}
+}
