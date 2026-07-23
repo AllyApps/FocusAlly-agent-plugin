@@ -19,7 +19,7 @@ claude --plugin-dir /path/to/FocusAlly-agent-plugin
 Marketplace:
 
 ```
-/plugin marketplace add nersonSwift/FocusAlly-agent-plugin
+/plugin marketplace add AllyApps/FocusAlly-agent-plugin
 /plugin install focusally
 ```
 
