@@ -64,10 +64,9 @@ func TestWorkBeginKeepsExistingOpenInterval(t *testing.T) {
 	}
 }
 
-// Gaps shorter than the 2-minute handoff-glue threshold carry no
-// signal (agent-handoff noise, e.g. a background agent finishing and
-// the main agent resuming) — the tracker glues them so the UI never
-// sees them.
+// Gaps shorter than the 30 s handoff-glue threshold carry no signal
+// (agent-handoff noise, e.g. a background agent finishing and the main
+// agent resuming) — the tracker glues them so the UI never sees them.
 func TestMergeAdjacentIntervalsUnderHandoffGlueGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
@@ -116,7 +115,7 @@ func TestIntervalCapAt500(t *testing.T) {
 		s.Apply(ev(WorkBegin, at))
 		at = at.Add(time.Minute)
 		s.Apply(ev(WorkEnd, at))
-		at = at.Add(3 * time.Minute) // 3 min gap > 2 min glue: no merging
+		at = at.Add(3 * time.Minute) // 3 min gap > 30 s glue: no merging
 	}
 	if len(s.ActiveIntervals) != 500 {
 		t.Fatalf("cap = 500, got %d", len(s.ActiveIntervals))
@@ -285,55 +284,47 @@ func TestSubagentEndFloorsAtZero(t *testing.T) {
 	}
 }
 
-// A user-answer wait longer than awaitSplitGap splits the work
-// interval: it closes at the question time (AwaitBegin) and reopens at
-// the answer time (the question tool's PostToolUse → Heartbeat).
-func TestAwaitSplitOverThreshold(t *testing.T) {
+// A user-answer wait closes the work interval at once (live pause). A
+// wait longer than handoffGlueGap stays a visible gap: the interval
+// ends at the question time and the resume (the question tool's
+// PostToolUse → Heartbeat) opens a fresh one at the answer time.
+func TestAwaitClosesAtOnceAndLongWaitStaysSplit(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
-	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
-	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
-		t.Fatalf("AwaitBegin must not itself split the interval: %+v", s.ActiveIntervals)
-	}
-	closed := s.Apply(ev(Heartbeat, base.Add(21*time.Minute)))
+	closed := s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
 	if !closed {
-		t.Fatal("a wait over the threshold must report an interval close (forces a flush)")
-	}
-	if len(s.ActiveIntervals) != 2 {
-		t.Fatalf("wait > 30 s must split into two intervals, got %d: %+v", len(s.ActiveIntervals), s.ActiveIntervals)
+		t.Fatal("AwaitBegin must close the interval at once (forces a flush → live pause)")
 	}
 	if end := s.ActiveIntervals[0].End; end == nil || !end.Time.Equal(base.Add(1*time.Minute)) {
-		t.Fatalf("first interval must end at the question time: %+v", s.ActiveIntervals[0])
+		t.Fatalf("AwaitBegin must close at the question time: %+v", s.ActiveIntervals[0])
+	}
+	s.Apply(ev(Heartbeat, base.Add(21*time.Minute)))
+	if len(s.ActiveIntervals) != 2 {
+		t.Fatalf("wait > 30 s must stay two intervals, got %d: %+v", len(s.ActiveIntervals), s.ActiveIntervals)
 	}
 	if second := s.ActiveIntervals[1]; second.End != nil || !second.Start.Time.Equal(base.Add(21*time.Minute)) {
 		t.Fatalf("second interval must open at the answer time: %+v", second)
 	}
-	if s.AwaitingSince != nil {
-		t.Fatal("AwaitingSince must be cleared after the resume")
-	}
 }
 
-// A wait at or under awaitSplitGap is answer latency, not a real
-// break — the interval stays continuous.
-func TestAwaitNoSplitUnderThreshold(t *testing.T) {
+// A wait under handoffGlueGap re-glues on resume: the momentary close
+// is retracted and the line stays one continuous stretch.
+func TestAwaitShortWaitRegluesContinuous(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
-	closed := s.Apply(ev(Heartbeat, base.Add(1*time.Minute+15*time.Second)))
-	if closed {
-		t.Fatal("a wait under the threshold must not close the interval")
-	}
+	s.Apply(ev(Heartbeat, base.Add(1*time.Minute+15*time.Second)))
 	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
-		t.Fatalf("wait <= 30 s must stay one open interval: %+v", s.ActiveIntervals)
+		t.Fatalf("wait < 30 s must re-glue into one open interval: %+v", s.ActiveIntervals)
 	}
-	if s.AwaitingSince != nil {
-		t.Fatal("AwaitingSince must be cleared even when no split happens")
+	if !s.ActiveIntervals[0].Start.Time.Equal(base) {
+		t.Fatalf("re-glued interval must keep the original start: %v", s.ActiveIntervals[0].Start.Time)
 	}
 }
 
 // A long gap between two Heartbeats with no AwaitBegin (e.g. a slow
 // non-blocking Bash build) must never split — only a genuine
-// user-answer wait does.
+// user-answer wait closes the interval.
 func TestNoAwaitNoSplitOnLongHeartbeatGap(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
@@ -347,32 +338,17 @@ func TestNoAwaitNoSplitOnLongHeartbeatGap(t *testing.T) {
 }
 
 // A subagent working through the wait keeps the interval open — the
-// refcount, not the wait, governs rest.
-func TestAwaitNoSplitWhileSubagentActive(t *testing.T) {
+// refcount, not the question, governs rest, so no pause is shown.
+func TestAwaitNoCloseWhileSubagentActive(t *testing.T) {
 	var s State
 	s.Apply(ev(WorkBegin, base))
 	s.Apply(subEv(SubagentBegin, base.Add(30*time.Second)))
-	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
-	closed := s.Apply(ev(Heartbeat, base.Add(21*time.Minute)))
+	closed := s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
 	if closed {
-		t.Fatal("a live subagent must suppress the await split")
+		t.Fatal("a live subagent must suppress the await close")
 	}
 	if len(s.ActiveIntervals) != 1 || s.ActiveIntervals[0].End != nil {
-		t.Fatalf("split must not happen while a subagent is active: %+v", s.ActiveIntervals)
-	}
-	if s.AwaitingSince != nil {
-		t.Fatal("AwaitingSince must be cleared even when the split is suppressed")
-	}
-}
-
-// A missed resume must not leak a pending wait into a resumed session.
-func TestSessionBeginClearsPendingAwait(t *testing.T) {
-	var s State
-	s.Apply(ev(WorkBegin, base))
-	s.Apply(ev(AwaitBegin, base.Add(1*time.Minute)))
-	s.Apply(ev(SessionBegin, base.Add(2*time.Minute)))
-	if s.AwaitingSince != nil {
-		t.Fatal("SessionBegin must clear a pending await")
+		t.Fatalf("close must not happen while a subagent is active: %+v", s.ActiveIntervals)
 	}
 }
 
