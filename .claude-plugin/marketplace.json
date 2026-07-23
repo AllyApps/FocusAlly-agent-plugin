@@ -5,9 +5,9 @@
   },
   "plugins": [
     {
-      "name": "focusally-tracker",
+      "name": "focusally",
       "source": "./",
-      "description": "Reports Claude Code session activity to FocusAlly (AI rail in the Day timeline)"
+      "description": "FocusAlly for Claude Code: session tracking on the Day timeline + the focusally MCP server (tasks, sessions, priorities)"
     }
   ]
 }

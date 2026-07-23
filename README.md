@@ -1,4 +1,4 @@
-# focusally-tracker
+# focusally
 
 Claude Code plugin that connects Claude Code to
 [FocusAlly](https://focus.withally.app): it reports coding-agent session
@@ -16,11 +16,11 @@ Prototype (local checkout):
 claude --plugin-dir /path/to/FocusAlly-agent-plugin
 ```
 
-Marketplace (once published):
+Marketplace:
 
 ```
-/plugin marketplace add <marketplace>
-/plugin install focusally-tracker
+/plugin marketplace add nersonSwift/FocusAlly-agent-plugin
+/plugin install focusally
 ```
 
 Nothing else — the plugin installs both halves with zero manual steps:

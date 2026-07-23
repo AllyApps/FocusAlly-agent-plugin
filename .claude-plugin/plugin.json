@@ -1,5 +1,5 @@
 {
-  "name": "focusally-tracker",
+  "name": "focusally",
   "description": "Connects Claude Code to FocusAlly: session-activity tracking on the Day timeline plus the focusally MCP server (tasks, sessions, priorities). One login powers both; re-login via the auth.login tool or a native dialog.",
   "version": "0.2.0"
 }
